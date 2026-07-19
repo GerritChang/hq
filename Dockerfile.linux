@@ -1,0 +1,20 @@
+FROM eclipse-temurin:21-jdk-jammy AS build
+
+WORKDIR /workspace
+COPY src/main/java ./src/main/java
+
+RUN mkdir -p /build/classes /output \
+    && javac -encoding UTF-8 -d /build/classes src/main/java/demo/MultiChannelWaveform.java \
+    && jar --create --file /build/waveform-viewer.jar \
+           --main-class demo.MultiChannelWaveform -C /build/classes . \
+    && jpackage --type app-image \
+           --input /build \
+           --main-jar waveform-viewer.jar \
+           --main-class demo.MultiChannelWaveform \
+           --name waveform-viewer \
+           --dest /output \
+           --java-options -Xms256m \
+           --java-options -Xmx2g
+
+FROM scratch AS export
+COPY --from=build /output/waveform-viewer /
