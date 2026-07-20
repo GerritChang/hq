@@ -1,4 +1,6 @@
-package demo;
+package layout;
+
+import analysis.WaveformDataInput;
 
 import javax.swing.*;
 import java.awt.*;
@@ -20,7 +22,7 @@ public final class MultiChannelWaveform {
         SwingUtilities.invokeLater(() -> {
             JFrame frame = new JFrame("20 通道时域波形 — 每通道 2500 万点");
             frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
-            WaveformPanel waveform = new WaveformPanel(new DemoDataSource(CHANNELS, SAMPLES_PER_CHANNEL));
+            WaveformPanel waveform = new WaveformPanel(new WaveformDataInput(CHANNELS, SAMPLES_PER_CHANNEL));
             JScrollPane scrollPane = new JScrollPane(waveform,
                     ScrollPaneConstants.VERTICAL_SCROLLBAR_ALWAYS,
                     ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
@@ -98,17 +100,6 @@ public final class MultiChannelWaveform {
         return toolbar;
     }
 
-    /** Implement this interface with a binary file/min-max pyramid for production data. */
-    public interface WaveformDataSource {
-        int channelCount();
-        long sampleCount();
-
-        /** Returns the minimum and maximum in the half-open sample range [from, to). */
-        void minMax(int channel, long from, long to, float[] result);
-
-        float valueAt(int channel, long sample);
-    }
-
     /** One annotation represents a synchronized cursor across every channel. */
     private record Annotation(long sample, String text) { }
     private record SpectralAnnotation(double frequency, boolean psd) { }
@@ -122,7 +113,7 @@ public final class MultiChannelWaveform {
         private static final int RIGHT = 12;
         private static final int TOP = 22;
         private static final int BOTTOM = 30;
-        private final WaveformDataSource source;
+        private final WaveformDataInput source;
         private final List<Annotation> annotations = new ArrayList<>();
         private final List<SpectralAnnotation> spectralAnnotations = new ArrayList<>();
         private final Deque<ViewState> backHistory = new ArrayDeque<>();
@@ -149,7 +140,7 @@ public final class MultiChannelWaveform {
         private boolean psdVisible;
         private String status = "准备渲染";
 
-        WaveformPanel(WaveformDataSource source) {
+        WaveformPanel(WaveformDataInput source) {
             this.source = source;
             viewLength = source.sampleCount();
             setBackground(new Color(11, 15, 23));
@@ -569,7 +560,7 @@ public final class MultiChannelWaveform {
         }
 
         /** Returns a normalized, one-sided spectrum where 0=-100 dB and 1=0 dB. */
-        private static double[] calculateSpectrum(WaveformDataSource source, int channel, long start,
+        private static double[] calculateSpectrum(WaveformDataInput source, int channel, long start,
                                                   long length, int requestedSize) {
             int n = requestedSize;
             while (n > length && n > 16) n >>= 1;
@@ -594,7 +585,7 @@ public final class MultiChannelWaveform {
         }
 
         /** Welch PSD estimate, normalized to a visible -100..0 dB/Hz range. */
-        private static double[] calculatePsd(WaveformDataSource source, int channel, long start,
+        private static double[] calculatePsd(WaveformDataInput source, int channel, long start,
                                              long length, int requestedSize, int segmentCount) {
             int n = requestedSize;
             while (n > length && n > 16) n >>= 1;
@@ -910,38 +901,4 @@ public final class MultiChannelWaveform {
         }
     }
 
-    /** Fast virtual source. Replace with an indexed binary-file source for measured data. */
-    private static final class DemoDataSource implements WaveformDataSource {
-        private final int channels;
-        private final long samples;
-        DemoDataSource(int channels, long samples) { this.channels = channels; this.samples = samples; }
-        public int channelCount() { return channels; }
-        public long sampleCount() { return samples; }
-        public float valueAt(int ch, long i) {
-            double t = i * (0.000006 + ch * 0.00000073);
-            double carrier = switch (ch % 4) {
-                case 0 -> Math.sin(t);
-                case 1 -> Math.sin(t) >= 0 ? 1 : -1;
-                case 2 -> 2.0 * (t / (2 * Math.PI) - Math.floor(t / (2 * Math.PI) + 0.5));
-                default -> Math.sin(t) * Math.sin(t * 0.031 + ch);
-            };
-            double amplitude = 0.48 + (ch % 5) * 0.08;
-            return (float) (amplitude * carrier + 0.13 * Math.sin(t * (2.7 + ch * 0.11)) + noise(ch, i) * 0.07);
-        }
-        public void minMax(int ch, long from, long to, float[] out) {
-            long count = Math.max(1, to - from);
-            long step = Math.max(1, count / 24); // demo approximation; production source uses exact LOD buckets
-            float min = Float.POSITIVE_INFINITY, max = Float.NEGATIVE_INFINITY;
-            for (long i = from; i < to; i += step) {
-                float v = valueAt(ch, i); min = Math.min(min, v); max = Math.max(max, v);
-            }
-            float last = valueAt(ch, to - 1); out[0] = Math.min(min, last); out[1] = Math.max(max, last);
-        }
-        private static double noise(int ch, long i) {
-            long z = i + ch * 0x9E3779B97F4A7C15L;
-            z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
-            z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
-            return ((z ^ (z >>> 31)) >>> 11) * 0x1.0p-53 * 2 - 1;
-        }
-    }
 }

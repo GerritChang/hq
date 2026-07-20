@@ -8,14 +8,14 @@
 
 ```powershell
 mvn compile
-java -cp target/classes demo.MultiChannelWaveform
+java -cp target/classes layout.MultiChannelWaveform
 ```
 
 也可不使用 Maven：
 
 ```powershell
-javac -encoding UTF-8 -d out src/main/java/demo/MultiChannelWaveform.java
-java -cp out demo.MultiChannelWaveform
+javac -encoding UTF-8 -d out src/main/java/analysis/WaveformDataInput.java src/main/java/layout/MultiChannelWaveform.java
+java -cp out layout.MultiChannelWaveform
 ```
 
 ## 构建 Linux 可执行程序

@@ -4,13 +4,15 @@ WORKDIR /workspace
 COPY src/main/java ./src/main/java
 
 RUN mkdir -p /build/classes /output \
-    && javac -encoding UTF-8 -d /build/classes src/main/java/demo/MultiChannelWaveform.java \
+    && javac -encoding UTF-8 -d /build/classes \
+           src/main/java/analysis/WaveformDataInput.java \
+           src/main/java/layout/MultiChannelWaveform.java \
     && jar --create --file /build/waveform-viewer.jar \
-           --main-class demo.MultiChannelWaveform -C /build/classes . \
+           --main-class layout.MultiChannelWaveform -C /build/classes . \
     && jpackage --type app-image \
            --input /build \
            --main-jar waveform-viewer.jar \
-           --main-class demo.MultiChannelWaveform \
+           --main-class layout.MultiChannelWaveform \
            --name waveform-viewer \
            --dest /output \
            --java-options -Xms256m \
