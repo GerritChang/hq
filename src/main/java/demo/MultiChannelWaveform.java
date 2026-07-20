@@ -102,7 +102,8 @@ public final class MultiChannelWaveform {
 
     /** One annotation represents a synchronized cursor across every channel. */
     private record Annotation(long sample, String text) { }
-    private record RenderResult(BufferedImage image, long millis) { }
+    private record SpectralAnnotation(double frequency, boolean psd) { }
+    private record RenderResult(BufferedImage image, long millis, double[][] spectra, double[][] psds) { }
     private record ViewState(long start, long length, double frequencyStart, double frequencySpan) { }
 
     private static final class WaveformPanel extends JPanel {
@@ -114,10 +115,13 @@ public final class MultiChannelWaveform {
         private static final int BOTTOM = 30;
         private final WaveformDataSource source;
         private final List<Annotation> annotations = new ArrayList<>();
+        private final List<SpectralAnnotation> spectralAnnotations = new ArrayList<>();
         private final Deque<ViewState> backHistory = new ArrayDeque<>();
         private final Deque<ViewState> forwardHistory = new ArrayDeque<>();
         private final Timer renderDelay;
         private BufferedImage image;
+        private double[][] spectrumCache;
+        private double[][] psdCache;
         private SwingWorker<RenderResult, Void> worker;
         private long viewStart;
         private long viewLength;
@@ -181,7 +185,7 @@ public final class MultiChannelWaveform {
                 @Override public void mouseReleased(MouseEvent e) {
                     if (selectionStart != null) {
                         if (selectionDragged) zoomToSelection();
-                        else addCoordinateAnnotation(e);
+                        else addAnnotation(e);
                         selectionStart = selectionEnd = null;
                         repaint();
                     }
@@ -238,9 +242,23 @@ public final class MultiChannelWaveform {
             return Math.max(0, Math.min(source.sampleCount() - length, candidate));
         }
 
-        private void addCoordinateAnnotation(MouseEvent e) {
+        private void addAnnotation(MouseEvent e) {
             int channel = channelAt(e.getY());
-            if (channel < 0 || e.getX() < LEFT || e.getX() > timePlotRight()) return;
+            if (channel < 0) return;
+            if (e.getX() >= frequencyPlotLeft()) {
+                boolean psd = e.getX() >= psdPlotLeft();
+                int left = psd ? psdPlotLeft() : frequencyPlotLeft();
+                int width = psd ? psdPlotWidth() : frequencyPlotWidth();
+                double fraction = Math.max(0, Math.min(1, (e.getX() - left) / (double) width));
+                double frequency = frequencyStart + fraction * frequencySpan;
+                double duplicateTolerance = frequencySpan / Math.max(1, width) * 0.25;
+                if (spectralAnnotations.stream().anyMatch(a -> a.psd == psd
+                        && Math.abs(a.frequency - frequency) <= duplicateTolerance)) return;
+                spectralAnnotations.add(new SpectralAnnotation(frequency, psd));
+                repaint();
+                return;
+            }
+            if (e.getX() < LEFT || e.getX() > timePlotRight()) return;
             long sample = sampleAt(e.getX());
             if (annotations.stream().anyMatch(annotation -> annotation.sample == sample)) return;
             annotations.add(new Annotation(sample, "X=" + String.format("%,d", sample)));
@@ -329,6 +347,20 @@ public final class MultiChannelWaveform {
         }
 
         private void removeNearestAnnotation(MouseEvent e) {
+            if (e.getX() >= frequencyPlotLeft()) {
+                boolean psd = e.getX() >= psdPlotLeft();
+                int left = psd ? psdPlotLeft() : frequencyPlotLeft();
+                int width = psd ? psdPlotWidth() : frequencyPlotWidth();
+                double frequency = frequencyStart + Math.max(0, Math.min(1,
+                        (e.getX() - left) / (double) width)) * frequencySpan;
+                double tolerance = frequencySpan / Math.max(1, width) * 8;
+                spectralAnnotations.stream().filter(a -> a.psd == psd
+                                && Math.abs(a.frequency - frequency) <= tolerance)
+                        .min((a, b) -> Double.compare(Math.abs(a.frequency - frequency),
+                                Math.abs(b.frequency - frequency)))
+                        .ifPresent(a -> { spectralAnnotations.remove(a); repaint(); });
+                return;
+            }
             long sample = sampleAt(e.getX());
             long tolerance = Math.max(1, viewLength / Math.max(1, getWidth()) * 8);
             annotations.stream().filter(a -> Math.abs(a.sample - sample) <= tolerance)
@@ -377,6 +409,8 @@ public final class MultiChannelWaveform {
                     int frequencyLeft = LEFT + plotW + COLUMN_GAP;
                     int psdLeft = frequencyLeft + plotW + COLUMN_GAP;
                     int plotH = h - TOP - BOTTOM;
+                    double[][] renderedSpectra = new double[source.channelCount()][];
+                    double[][] renderedPsds = new double[source.channelCount()][];
                     for (int ch = 0; ch < source.channelCount(); ch++) {
                         int bandTop = TOP + ch * plotH / source.channelCount();
                         int bandBottom = TOP + (ch + 1) * plotH / source.channelCount();
@@ -410,6 +444,7 @@ public final class MultiChannelWaveform {
                             previousY = currentY;
                         }
                         double[] spectrum = calculateSpectrum(source, ch, requestedStart, requestedLength, 1024);
+                        renderedSpectra[ch] = spectrum;
                         int previousSpectrumY = y1;
                         int firstBin = Math.max(0, (int) Math.floor(requestedFrequencyStart * 2 * (spectrum.length - 1)));
                         int lastBin = Math.min(spectrum.length - 1,
@@ -428,6 +463,7 @@ public final class MultiChannelWaveform {
                             previousSpectrumY = currentY;
                         }
                         double[] psd = calculatePsd(source, ch, requestedStart, requestedLength, 512, 4);
+                        renderedPsds[ch] = psd;
                         int firstPsdBin = Math.max(0, (int) Math.floor(
                                 requestedFrequencyStart * 2 * (psd.length - 1)));
                         int lastPsdBin = Math.min(psd.length - 1, (int) Math.ceil(
@@ -446,12 +482,15 @@ public final class MultiChannelWaveform {
                             previousPsdY = currentY;
                         }
                     }
-                    return new RenderResult(target, (System.nanoTime() - began) / 1_000_000);
+                    return new RenderResult(target, (System.nanoTime() - began) / 1_000_000,
+                            renderedSpectra, renderedPsds);
                 }
                 @Override protected void done() {
                     if (isCancelled()) return;
                     try {
                         RenderResult r = get(); image = r.image;
+                        spectrumCache = r.spectra;
+                        psdCache = r.psds;
                         status = String.format("显示 %,d–%,d（%,d 点/通道） | 折线渲染 %d ms | 左键标注，右键删除",
                                 requestedStart, requestedStart + requestedLength - 1, requestedLength, r.millis);
                         repaint();
@@ -677,7 +716,13 @@ public final class MultiChannelWaveform {
                 g2.drawString(psdLegend, psdLegendX, legendY);
             }
             List<List<Rectangle>> occupiedLabels = new ArrayList<>(source.channelCount());
-            for (int ch = 0; ch < source.channelCount(); ch++) occupiedLabels.add(new ArrayList<>());
+            List<List<Rectangle>> occupiedFftLabels = new ArrayList<>(source.channelCount());
+            List<List<Rectangle>> occupiedPsdLabels = new ArrayList<>(source.channelCount());
+            for (int ch = 0; ch < source.channelCount(); ch++) {
+                occupiedLabels.add(new ArrayList<>());
+                occupiedFftLabels.add(new ArrayList<>());
+                occupiedPsdLabels.add(new ArrayList<>());
+            }
             for (Annotation a : annotations) {
                 if (a.sample < viewStart || a.sample >= viewStart + viewLength) continue;
                 int x = LEFT + (int) ((a.sample - viewStart) * timeWidth / (double) viewLength);
@@ -694,7 +739,7 @@ public final class MultiChannelWaveform {
                     g2.fillOval(x - 3, markerY - 3, 7, 7);
                     String text = a.text + "  Y=" + String.format("%.5f", value);
                     Rectangle labelBounds = findFreeLabelBounds(g2, text, x, markerY, y0 + 1, axisBottom - 1,
-                            occupiedLabels.get(ch));
+                            LEFT, timeRight, occupiedLabels.get(ch));
                     if (labelBounds != null) {
                         occupiedLabels.get(ch).add(labelBounds);
                         int targetX = labelBounds.x > x ? labelBounds.x : labelBounds.x + labelBounds.width;
@@ -704,6 +749,46 @@ public final class MultiChannelWaveform {
                         g2.setColor(new Color(255, 205, 85));
                         g2.drawString(text, labelBounds.x + 2,
                                 labelBounds.y + g2.getFontMetrics().getAscent() + 1);
+                    }
+                }
+            }
+            if (spectrumCache != null && psdCache != null) {
+                for (SpectralAnnotation annotation : spectralAnnotations) {
+                    if (annotation.frequency < frequencyStart
+                            || annotation.frequency > frequencyStart + frequencySpan) continue;
+                    int plotLeft = annotation.psd ? psdLeft : frequencyLeft;
+                    int plotRight = annotation.psd ? psdRight : frequencyRight;
+                    int x = plotLeft + (int) Math.round((annotation.frequency - frequencyStart)
+                            / frequencySpan * (plotRight - plotLeft));
+                    for (int ch = 0; ch < source.channelCount(); ch++) {
+                        double[] values = annotation.psd ? psdCache[ch] : spectrumCache[ch];
+                        double normalized = spectralValueAt(values, annotation.frequency);
+                        double db = normalized * 100.0 - 100.0;
+                        int y0 = TOP + ch * plotH / source.channelCount();
+                        int y1 = TOP + (ch + 1) * plotH / source.channelCount();
+                        int axisBottom = y1 - 13;
+                        int markerY = axisBottom - (int) Math.round(normalized * (axisBottom - y0 - 2));
+                        markerY = Math.max(y0 + 2, Math.min(axisBottom, markerY));
+                        g2.setColor(new Color(255, 190, 70, 135));
+                        g2.drawLine(x, y0 + 1, x, axisBottom);
+                        g2.setColor(new Color(255, 205, 85));
+                        g2.fillOval(x - 3, markerY - 3, 7, 7);
+                        String unit = annotation.psd ? " dB/Hz" : " dB";
+                        String text = String.format("F=%.6f  Y=%.2f%s", annotation.frequency, db, unit);
+                        List<Rectangle> occupied = annotation.psd
+                                ? occupiedPsdLabels.get(ch) : occupiedFftLabels.get(ch);
+                        Rectangle bounds = findFreeLabelBounds(g2, text, x, markerY, y0 + 1,
+                                axisBottom - 1, plotLeft, plotRight, occupied);
+                        if (bounds != null) {
+                            occupied.add(bounds);
+                            int targetX = bounds.x > x ? bounds.x : bounds.x + bounds.width;
+                            int targetY = bounds.y + bounds.height / 2;
+                            g2.setColor(new Color(255, 190, 70, 150));
+                            g2.drawLine(x, markerY, targetX, targetY);
+                            g2.setColor(new Color(255, 205, 85));
+                            g2.drawString(text, bounds.x + 2,
+                                    bounds.y + g2.getFontMetrics().getAscent() + 1);
+                        }
                     }
                 }
             }
@@ -726,18 +811,30 @@ public final class MultiChannelWaveform {
             return Long.toString(value);
         }
 
+        private static double spectralValueAt(double[] values, double frequency) {
+            if (values == null || values.length == 0) return 0;
+            double index = Math.max(0, Math.min(values.length - 1,
+                    frequency / 0.5 * (values.length - 1)));
+            int lower = (int) Math.floor(index);
+            int upper = Math.min(values.length - 1, lower + 1);
+            double fraction = index - lower;
+            return values[lower] * (1 - fraction) + values[upper] * fraction;
+        }
+
         /** Finds a label position that stays inside its channel and intersects no earlier label. */
         private static Rectangle findFreeLabelBounds(Graphics2D g2, String text, int pointX, int pointY,
-                                                       int top, int bottom, List<Rectangle> occupied) {
+                                                       int top, int bottom, int plotLeft, int plotRight,
+                                                       List<Rectangle> occupied) {
             FontMetrics fm = g2.getFontMetrics();
             int width = fm.stringWidth(text) + 4;
             int height = fm.getHeight() + 2;
-            int maxX = g2.getClipBounds() == null ? Integer.MAX_VALUE : g2.getClipBounds().x + g2.getClipBounds().width;
+            int minX = plotLeft + 2;
+            int maxX = plotRight;
             int[] xs = {pointX + 8, pointX - width - 8};
             int[] preferredYs = {pointY - height - 4, pointY + 4};
             for (int preferredY : preferredYs) {
                 for (int x : xs) {
-                    int boundedX = Math.max(LEFT + 2, Math.min(maxX - width - 2, x));
+                    int boundedX = Math.max(minX, Math.min(maxX - width - 2, x));
                     int boundedY = Math.max(top, Math.min(bottom - height, preferredY));
                     Rectangle candidate = new Rectangle(boundedX, boundedY, width, height);
                     if (occupied.stream().noneMatch(candidate::intersects)) return candidate;
@@ -746,7 +843,7 @@ public final class MultiChannelWaveform {
             // Search rows across the channel when all positions near the selected point are occupied.
             for (int y = top; y + height <= bottom; y += height + 2) {
                 for (int x : xs) {
-                    int boundedX = Math.max(LEFT + 2, Math.min(maxX - width - 2, x));
+                    int boundedX = Math.max(minX, Math.min(maxX - width - 2, x));
                     Rectangle candidate = new Rectangle(boundedX, y, width, height);
                     if (occupied.stream().noneMatch(candidate::intersects)) return candidate;
                 }
