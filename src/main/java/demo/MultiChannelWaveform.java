@@ -70,12 +70,18 @@ public final class MultiChannelWaveform {
         JButton back = new JButton("◀ 缩放后退");
         JButton forward = new JButton("缩放前进 ▶");
         JToggleButton drag = new JToggleButton("✥ 拖拽");
+        JToggleButton frequency = new JToggleButton("显示 FFT");
+        JToggleButton psd = new JToggleButton("显示 PSD");
         back.setToolTipText("返回上一个缩放视图");
         forward.setToolTipText("前往下一个缩放视图");
         drag.setToolTipText("开启后使用鼠标左键平移全部通道");
+        frequency.setToolTipText("开启或隐藏 FFT 频域图");
+        psd.setToolTipText("开启或隐藏功率谱密度图");
         back.addActionListener(e -> waveform.goBack());
         forward.addActionListener(e -> waveform.goForward());
         drag.addActionListener(e -> waveform.setDragMode(drag.isSelected()));
+        frequency.addActionListener(e -> waveform.setFrequencyVisible(frequency.isSelected()));
+        psd.addActionListener(e -> waveform.setPsdVisible(psd.isSelected()));
         toolbar.add(new JLabel("起始点 "));
         toolbar.add(rangeStart);
         toolbar.add(new JLabel("  结束点 "));
@@ -85,6 +91,9 @@ public final class MultiChannelWaveform {
         toolbar.add(forward);
         toolbar.addSeparator();
         toolbar.add(drag);
+        toolbar.addSeparator();
+        toolbar.add(frequency);
+        toolbar.add(psd);
         toolbar.add(Box.createHorizontalGlue());
         return toolbar;
     }
@@ -136,6 +145,8 @@ public final class MultiChannelWaveform {
         private int selectionFrequencyLeft;
         private int selectionFrequencyRight;
         private boolean dragMode;
+        private boolean frequencyVisible;
+        private boolean psdVisible;
         private String status = "准备渲染";
 
         WaveformPanel(WaveformDataSource source) {
@@ -153,12 +164,14 @@ public final class MultiChannelWaveform {
             MouseAdapter mouse = new MouseAdapter() {
                 @Override public void mousePressed(MouseEvent e) {
                     if (SwingUtilities.isLeftMouseButton(e) && !e.isShiftDown() && !dragMode) {
-                        if (e.getX() < LEFT || (e.getX() > timePlotRight() && e.getX() < frequencyPlotLeft())) return;
+                        boolean inFrequency = isFrequencyX(e.getX());
+                        boolean inPsd = isPsdX(e.getX());
+                        if (e.getX() < LEFT || (!inFrequency && !inPsd && e.getX() > timePlotRight())) return;
                         selectionStart = e.getPoint();
                         selectionEnd = e.getPoint();
-                        frequencySelection = e.getX() >= frequencyPlotLeft();
-                        selectionFrequencyLeft = e.getX() >= psdPlotLeft() ? psdPlotLeft() : frequencyPlotLeft();
-                        selectionFrequencyRight = e.getX() >= psdPlotLeft() ? psdPlotRight() : frequencyPlotRight();
+                        frequencySelection = inFrequency || inPsd;
+                        selectionFrequencyLeft = inPsd ? psdPlotLeft() : frequencyPlotLeft();
+                        selectionFrequencyRight = inPsd ? psdPlotRight() : frequencyPlotRight();
                         selectionDragged = false;
                     } else if (SwingUtilities.isMiddleMouseButton(e)
                             || (SwingUtilities.isLeftMouseButton(e) && (e.isShiftDown() || dragMode))) {
@@ -211,9 +224,9 @@ public final class MultiChannelWaveform {
                 return;
             }
             int plotWidth = timePlotWidth();
-            if (e.getX() >= frequencyPlotLeft()) {
-                int frequencyColumnLeft = e.getX() >= psdPlotLeft() ? psdPlotLeft() : frequencyPlotLeft();
-                int frequencyColumnWidth = e.getX() >= psdPlotLeft() ? psdPlotWidth() : frequencyPlotWidth();
+            if (isFrequencyX(e.getX()) || isPsdX(e.getX())) {
+                int frequencyColumnLeft = isPsdX(e.getX()) ? psdPlotLeft() : frequencyPlotLeft();
+                int frequencyColumnWidth = isPsdX(e.getX()) ? psdPlotWidth() : frequencyPlotWidth();
                 double fraction = Math.max(0, Math.min(1,
                         (e.getX() - frequencyColumnLeft) / (double) Math.max(1, frequencyColumnWidth)));
                 double anchor = frequencyStart + fraction * frequencySpan;
@@ -245,8 +258,8 @@ public final class MultiChannelWaveform {
         private void addAnnotation(MouseEvent e) {
             int channel = channelAt(e.getY());
             if (channel < 0) return;
-            if (e.getX() >= frequencyPlotLeft()) {
-                boolean psd = e.getX() >= psdPlotLeft();
+            if (isFrequencyX(e.getX()) || isPsdX(e.getX())) {
+                boolean psd = isPsdX(e.getX());
                 int left = psd ? psdPlotLeft() : frequencyPlotLeft();
                 int width = psd ? psdPlotWidth() : frequencyPlotWidth();
                 double fraction = Math.max(0, Math.min(1, (e.getX() - left) / (double) width));
@@ -298,6 +311,20 @@ public final class MultiChannelWaveform {
             setCursor(enabled ? Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR) : Cursor.getDefaultCursor());
         }
 
+        void setFrequencyVisible(boolean visible) {
+            frequencyVisible = visible;
+            spectrumCache = null;
+            startRender();
+            repaint();
+        }
+
+        void setPsdVisible(boolean visible) {
+            psdVisible = visible;
+            psdCache = null;
+            startRender();
+            repaint();
+        }
+
         private void rememberView() {
             ViewState current = new ViewState(viewStart, viewLength, frequencyStart, frequencySpan);
             if (backHistory.peekLast() == null || !backHistory.peekLast().equals(current)) {
@@ -347,8 +374,8 @@ public final class MultiChannelWaveform {
         }
 
         private void removeNearestAnnotation(MouseEvent e) {
-            if (e.getX() >= frequencyPlotLeft()) {
-                boolean psd = e.getX() >= psdPlotLeft();
+            if (isFrequencyX(e.getX()) || isPsdX(e.getX())) {
+                boolean psd = isPsdX(e.getX());
                 int left = psd ? psdPlotLeft() : frequencyPlotLeft();
                 int width = psd ? psdPlotWidth() : frequencyPlotWidth();
                 double frequency = frequencyStart + Math.max(0, Math.min(1,
@@ -380,7 +407,8 @@ public final class MultiChannelWaveform {
         }
 
         private int timePlotWidth() {
-            return Math.max(1, (getWidth() - LEFT - 2 * COLUMN_GAP - RIGHT) / 3);
+            int columns = 1 + (frequencyVisible ? 1 : 0) + (psdVisible ? 1 : 0);
+            return Math.max(1, (getWidth() - LEFT - (columns - 1) * COLUMN_GAP - RIGHT) / columns);
         }
 
         private int timePlotRight() { return LEFT + timePlotWidth(); }
@@ -388,9 +416,15 @@ public final class MultiChannelWaveform {
         private int frequencyPlotLeft() { return timePlotRight() + COLUMN_GAP; }
         private int frequencyPlotRight() { return frequencyPlotLeft() + timePlotWidth(); }
         private int frequencyPlotWidth() { return Math.max(1, frequencyPlotRight() - frequencyPlotLeft()); }
-        private int psdPlotLeft() { return frequencyPlotRight() + COLUMN_GAP; }
-        private int psdPlotRight() { return getWidth() - RIGHT; }
+        private int psdPlotLeft() {
+            return timePlotRight() + COLUMN_GAP + (frequencyVisible ? timePlotWidth() + COLUMN_GAP : 0);
+        }
+        private int psdPlotRight() { return psdPlotLeft() + timePlotWidth(); }
         private int psdPlotWidth() { return Math.max(1, psdPlotRight() - psdPlotLeft()); }
+        private boolean isFrequencyX(int x) {
+            return frequencyVisible && x >= frequencyPlotLeft() && x <= frequencyPlotRight();
+        }
+        private boolean isPsdX(int x) { return psdVisible && x >= psdPlotLeft() && x <= psdPlotRight(); }
 
         private void startRender() {
             int w = getWidth(), h = getHeight();
@@ -398,6 +432,8 @@ public final class MultiChannelWaveform {
             if (worker != null) worker.cancel(true);
             long requestedStart = viewStart, requestedLength = viewLength;
             double requestedFrequencyStart = frequencyStart, requestedFrequencySpan = frequencySpan;
+            boolean requestedFrequencyVisible = frequencyVisible;
+            boolean requestedPsdVisible = psdVisible;
             status = "正在生成 20 通道连续折线…";
             worker = new SwingWorker<>() {
                 @Override protected RenderResult doInBackground() {
@@ -405,9 +441,11 @@ public final class MultiChannelWaveform {
                     BufferedImage target = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
                     int[] pixels = ((DataBufferInt) target.getRaster().getDataBuffer()).getData();
                     java.util.Arrays.fill(pixels, 0x0B0F17);
-                    int plotW = Math.max(1, (w - LEFT - 2 * COLUMN_GAP - RIGHT) / 3);
+                    int columns = 1 + (requestedFrequencyVisible ? 1 : 0) + (requestedPsdVisible ? 1 : 0);
+                    int plotW = Math.max(1, (w - LEFT - (columns - 1) * COLUMN_GAP - RIGHT) / columns);
                     int frequencyLeft = LEFT + plotW + COLUMN_GAP;
-                    int psdLeft = frequencyLeft + plotW + COLUMN_GAP;
+                    int psdLeft = LEFT + plotW + COLUMN_GAP
+                            + (requestedFrequencyVisible ? plotW + COLUMN_GAP : 0);
                     int plotH = h - TOP - BOTTOM;
                     double[][] renderedSpectra = new double[source.channelCount()][];
                     double[][] renderedPsds = new double[source.channelCount()][];
@@ -443,25 +481,28 @@ public final class MultiChannelWaveform {
                             previousX = currentX;
                             previousY = currentY;
                         }
-                        double[] spectrum = calculateSpectrum(source, ch, requestedStart, requestedLength, 1024);
-                        renderedSpectra[ch] = spectrum;
-                        int previousSpectrumY = y1;
-                        int firstBin = Math.max(0, (int) Math.floor(requestedFrequencyStart * 2 * (spectrum.length - 1)));
-                        int lastBin = Math.min(spectrum.length - 1,
-                                (int) Math.ceil((requestedFrequencyStart + requestedFrequencySpan) * 2 * (spectrum.length - 1)));
-                        int previousSpectrumX = frequencyLeft;
-                        for (int bin = firstBin; bin <= lastBin; bin++) {
-                            double binFrequency = bin * 0.5 / Math.max(1, spectrum.length - 1);
-                            int currentX = frequencyLeft + (int) Math.round(
-                                    (binFrequency - requestedFrequencyStart) / requestedFrequencySpan * (plotW - 1));
-                            currentX = Math.max(frequencyLeft, Math.min(frequencyLeft + plotW - 1, currentX));
-                            int currentY = y1 - (int) Math.round(spectrum[bin] * (y1 - y0));
-                            currentY = Math.max(y0 + 1, Math.min(y1 - 1, currentY));
-                            if (bin > firstBin) drawLine(pixels, w, previousSpectrumX,
-                                    previousSpectrumY, currentX, currentY, channelColor(ch));
-                            previousSpectrumX = currentX;
-                            previousSpectrumY = currentY;
+                        if (requestedFrequencyVisible) {
+                            double[] spectrum = calculateSpectrum(source, ch, requestedStart, requestedLength, 1024);
+                            renderedSpectra[ch] = spectrum;
+                            int previousSpectrumY = y1;
+                            int firstBin = Math.max(0, (int) Math.floor(requestedFrequencyStart * 2 * (spectrum.length - 1)));
+                            int lastBin = Math.min(spectrum.length - 1, (int) Math.ceil(
+                                    (requestedFrequencyStart + requestedFrequencySpan) * 2 * (spectrum.length - 1)));
+                            int previousSpectrumX = frequencyLeft;
+                            for (int bin = firstBin; bin <= lastBin; bin++) {
+                                double binFrequency = bin * 0.5 / Math.max(1, spectrum.length - 1);
+                                int currentX = frequencyLeft + (int) Math.round(
+                                        (binFrequency - requestedFrequencyStart) / requestedFrequencySpan * (plotW - 1));
+                                currentX = Math.max(frequencyLeft, Math.min(frequencyLeft + plotW - 1, currentX));
+                                int currentY = y1 - (int) Math.round(spectrum[bin] * (y1 - y0));
+                                currentY = Math.max(y0 + 1, Math.min(y1 - 1, currentY));
+                                if (bin > firstBin) drawLine(pixels, w, previousSpectrumX,
+                                        previousSpectrumY, currentX, currentY, channelColor(ch));
+                                previousSpectrumX = currentX;
+                                previousSpectrumY = currentY;
+                            }
                         }
+                        if (!requestedPsdVisible) continue;
                         double[] psd = calculatePsd(source, ch, requestedStart, requestedLength, 512, 4);
                         renderedPsds[ch] = psd;
                         int firstPsdBin = Math.max(0, (int) Math.floor(
@@ -634,10 +675,10 @@ public final class MultiChannelWaveform {
             int plotH = getHeight() - TOP - BOTTOM;
             int timeWidth = timePlotWidth();
             int timeRight = LEFT + timeWidth;
-            int frequencyLeft = timeRight + COLUMN_GAP;
-            int frequencyRight = frequencyLeft + timeWidth;
-            int psdLeft = frequencyRight + COLUMN_GAP;
-            int psdRight = getWidth() - RIGHT;
+            int frequencyLeft = frequencyPlotLeft();
+            int frequencyRight = frequencyPlotRight();
+            int psdLeft = psdPlotLeft();
+            int psdRight = psdPlotRight();
             for (int ch = 0; ch < source.channelCount(); ch++) {
                 int bandTop = TOP + ch * plotH / source.channelCount();
                 int bandBottom = TOP + (ch + 1) * plotH / source.channelCount();
@@ -648,10 +689,14 @@ public final class MultiChannelWaveform {
                 g2.setColor(new Color(105, 116, 135));
                 g2.drawLine(LEFT, bandTop + 2, LEFT, axisBottom);
                 g2.drawLine(LEFT, axisBottom, timeRight, axisBottom);
-                g2.drawLine(frequencyLeft, bandTop + 2, frequencyLeft, axisBottom);
-                g2.drawLine(frequencyLeft, axisBottom, frequencyRight, axisBottom);
-                g2.drawLine(psdLeft, bandTop + 2, psdLeft, axisBottom);
-                g2.drawLine(psdLeft, axisBottom, psdRight, axisBottom);
+                if (frequencyVisible) {
+                    g2.drawLine(frequencyLeft, bandTop + 2, frequencyLeft, axisBottom);
+                    g2.drawLine(frequencyLeft, axisBottom, frequencyRight, axisBottom);
+                }
+                if (psdVisible) {
+                    g2.drawLine(psdLeft, bandTop + 2, psdLeft, axisBottom);
+                    g2.drawLine(psdLeft, axisBottom, psdRight, axisBottom);
+                }
                 // Detailed time-domain Y axis: values use the same mapping as the waveform.
                 for (int tick = 0; tick <= 4; tick++) {
                     float value = 1.0f - tick * 0.5f;
@@ -667,18 +712,22 @@ public final class MultiChannelWaveform {
                 for (int tick = 0; tick <= 5; tick++) {
                     int db = -tick * 20;
                     int y = bandTop + 2 + tick * (axisBottom - bandTop - 2) / 5;
-                    g2.setColor(new Color(48, 58, 73));
-                    g2.drawLine(frequencyLeft + 1, y, frequencyRight, y);
-                    g2.setColor(new Color(130, 142, 161));
-                    g2.drawLine(frequencyLeft - 4, y, frequencyLeft, y);
-                    String dbLabel = db + " dB";
-                    g2.drawString(dbLabel, frequencyLeft - g2.getFontMetrics().stringWidth(dbLabel) - 6, y + 4);
-                    g2.setColor(new Color(48, 58, 73));
-                    g2.drawLine(psdLeft + 1, y, psdRight, y);
-                    g2.setColor(new Color(130, 142, 161));
-                    g2.drawLine(psdLeft - 4, y, psdLeft, y);
-                    String psdLabel = db + " dB/Hz";
-                    g2.drawString(psdLabel, psdLeft - g2.getFontMetrics().stringWidth(psdLabel) - 6, y + 4);
+                    if (frequencyVisible) {
+                        g2.setColor(new Color(48, 58, 73));
+                        g2.drawLine(frequencyLeft + 1, y, frequencyRight, y);
+                        g2.setColor(new Color(130, 142, 161));
+                        g2.drawLine(frequencyLeft - 4, y, frequencyLeft, y);
+                        String dbLabel = db + " dB";
+                        g2.drawString(dbLabel, frequencyLeft - g2.getFontMetrics().stringWidth(dbLabel) - 6, y + 4);
+                    }
+                    if (psdVisible) {
+                        g2.setColor(new Color(48, 58, 73));
+                        g2.drawLine(psdLeft + 1, y, psdRight, y);
+                        g2.setColor(new Color(130, 142, 161));
+                        g2.drawLine(psdLeft - 4, y, psdLeft, y);
+                        String psdLabel = db + " dB/Hz";
+                        g2.drawString(psdLabel, psdLeft - g2.getFontMetrics().stringWidth(psdLabel) - 6, y + 4);
+                    }
                 }
                 g2.setColor(new Color(105, 116, 135));
                 for (int tick = 0; tick <= 4; tick++) {
@@ -688,13 +737,17 @@ public final class MultiChannelWaveform {
                     String label = compactNumber(sample);
                     int labelX = Math.max(LEFT, Math.min(getWidth() - 40, x - g2.getFontMetrics().stringWidth(label) / 2));
                     g2.drawString(label, labelX, bandBottom - 2);
-                    int fx = frequencyLeft + tick * Math.max(1, frequencyRight - frequencyLeft) / 4;
-                    g2.drawLine(fx, axisBottom, fx, axisBottom + 3);
                     String frequencyLabel = String.format("%.4f", frequencyStart + tick * frequencySpan / 4);
-                    g2.drawString(frequencyLabel, Math.min(frequencyRight - 25, fx - 10), bandBottom - 2);
-                    int psdX = psdLeft + tick * Math.max(1, psdRight - psdLeft) / 4;
-                    g2.drawLine(psdX, axisBottom, psdX, axisBottom + 3);
-                    g2.drawString(frequencyLabel, Math.min(psdRight - 25, psdX - 10), bandBottom - 2);
+                    if (frequencyVisible) {
+                        int fx = frequencyLeft + tick * Math.max(1, frequencyRight - frequencyLeft) / 4;
+                        g2.drawLine(fx, axisBottom, fx, axisBottom + 3);
+                        g2.drawString(frequencyLabel, Math.min(frequencyRight - 25, fx - 10), bandBottom - 2);
+                    }
+                    if (psdVisible) {
+                        int psdX = psdLeft + tick * Math.max(1, psdRight - psdLeft) / 4;
+                        g2.drawLine(psdX, axisBottom, psdX, axisBottom + 3);
+                        g2.drawString(frequencyLabel, Math.min(psdRight - 25, psdX - 10), bandBottom - 2);
+                    }
                 }
                 String legend = "CH" + (ch + 1) + " 时域";
                 int legendWidth = g2.getFontMetrics().stringWidth(legend);
@@ -704,16 +757,20 @@ public final class MultiChannelWaveform {
                 g2.drawLine(legendTextX - 25, legendY - 4, legendTextX - 5, legendY - 4);
                 g2.fillOval(legendTextX - 17, legendY - 7, 6, 6);
                 g2.drawString(legend, legendTextX, legendY);
-                String frequencyLegend = "CH" + (ch + 1) + " FFT";
-                int frequencyLegendX = frequencyRight - g2.getFontMetrics().stringWidth(frequencyLegend) - 7;
-                g2.drawLine(frequencyLegendX - 25, legendY - 4, frequencyLegendX - 5, legendY - 4);
-                g2.fillOval(frequencyLegendX - 17, legendY - 7, 6, 6);
-                g2.drawString(frequencyLegend, frequencyLegendX, legendY);
-                String psdLegend = "CH" + (ch + 1) + " PSD";
-                int psdLegendX = psdRight - g2.getFontMetrics().stringWidth(psdLegend) - 7;
-                g2.drawLine(psdLegendX - 25, legendY - 4, psdLegendX - 5, legendY - 4);
-                g2.fillOval(psdLegendX - 17, legendY - 7, 6, 6);
-                g2.drawString(psdLegend, psdLegendX, legendY);
+                if (frequencyVisible) {
+                    String frequencyLegend = "CH" + (ch + 1) + " FFT";
+                    int frequencyLegendX = frequencyRight - g2.getFontMetrics().stringWidth(frequencyLegend) - 7;
+                    g2.drawLine(frequencyLegendX - 25, legendY - 4, frequencyLegendX - 5, legendY - 4);
+                    g2.fillOval(frequencyLegendX - 17, legendY - 7, 6, 6);
+                    g2.drawString(frequencyLegend, frequencyLegendX, legendY);
+                }
+                if (psdVisible) {
+                    String psdLegend = "CH" + (ch + 1) + " PSD";
+                    int psdLegendX = psdRight - g2.getFontMetrics().stringWidth(psdLegend) - 7;
+                    g2.drawLine(psdLegendX - 25, legendY - 4, psdLegendX - 5, legendY - 4);
+                    g2.fillOval(psdLegendX - 17, legendY - 7, 6, 6);
+                    g2.drawString(psdLegend, psdLegendX, legendY);
+                }
             }
             List<List<Rectangle>> occupiedLabels = new ArrayList<>(source.channelCount());
             List<List<Rectangle>> occupiedFftLabels = new ArrayList<>(source.channelCount());
@@ -754,6 +811,7 @@ public final class MultiChannelWaveform {
             }
             if (spectrumCache != null && psdCache != null) {
                 for (SpectralAnnotation annotation : spectralAnnotations) {
+                    if ((annotation.psd && !psdVisible) || (!annotation.psd && !frequencyVisible)) continue;
                     if (annotation.frequency < frequencyStart
                             || annotation.frequency > frequencyStart + frequencySpan) continue;
                     int plotLeft = annotation.psd ? psdLeft : frequencyLeft;
